@@ -47,3 +47,8 @@ coverage/
 # Misc
 *.log
 *.pem
+
+# Build artifacts / packaged outputs
+*.tar.gz
+docker-package/
+haogpt-web/
