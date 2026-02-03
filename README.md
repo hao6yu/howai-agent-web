@@ -183,6 +183,10 @@ The app can be deployed to any platform that supports Next.js:
 4. Test thoroughly
 5. Submit a pull request
 
+## Support
+
+☕ [Buy me a coffee](https://buymeacoffee.com/haoy)
+
 ## License
 
 This project is part of the HowAI application suite.
