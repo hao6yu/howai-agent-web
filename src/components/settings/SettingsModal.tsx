@@ -6,6 +6,7 @@ import { useAuth } from '@/hooks/useAuth'
 import { supabase } from '@/lib/supabase'
 import AIPersonalitySettings from './AIPersonalitySettings'
 import { useFontSize, fontSizeMap } from '@/context/FontSizeContext'
+import { isWebPortalUnrestricted } from '@/lib/chat/accessPolicy'
 
 interface UserProfile {
   id?: string
@@ -44,7 +45,7 @@ export default function SettingsModal({ isOpen, onClose, darkMode, onDarkModeCha
   const [nicknameLoading, setNicknameLoading] = useState(false)
   const [nicknameSaving, setNicknameSaving] = useState(false)
   const [nicknameChanged, setNicknameChanged] = useState(false)
-  const isPremium = true // All web users are premium
+  const isPremium = isWebPortalUnrestricted()
 
   // Load user profile and nickname
   useEffect(() => {

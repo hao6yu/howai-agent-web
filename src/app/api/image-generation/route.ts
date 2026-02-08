@@ -37,7 +37,7 @@ export async function POST(request: NextRequest) {
       style: 'natural' // Changed from 'vivid' to 'natural' - faster generation
     })
 
-    const imageUrl = response.data[0]?.url
+    const imageUrl = response.data?.[0]?.url
 
     if (!imageUrl) {
       console.error('[Image Generation] No image URL returned from OpenAI')
@@ -54,7 +54,7 @@ export async function POST(request: NextRequest) {
       prompt,
       size: validatedSize,
       quality: validatedQuality,
-      revised_prompt: response.data[0]?.revised_prompt
+      revised_prompt: response.data?.[0]?.revised_prompt
     })
 
   } catch (error) {

@@ -4,6 +4,7 @@ import { createClient } from '@/lib/supabase-server'
 import { AIPersonalityService } from '@/services/aiPersonalityService'
 import { UserProfileService } from '@/services/userProfileService'
 import { AIPersonalityConfigService } from '@/services/aiPersonalityConfigService'
+import { isWebPortalUnrestricted } from '@/lib/chat/accessPolicy'
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -118,7 +119,7 @@ export async function POST(request: NextRequest) {
       aiName: aiPersonality?.ai_name, // Use custom AI name
       characteristicsSummary: characteristicsSummary,
       generateTitle: shouldGenerateTitle,
-      isPremiumUser: true, // TODO: Implement subscription checking
+      isPremiumUser: isWebPortalUnrestricted(),
       userWantsPresentations: false, // TODO: Implement presentation intent detection
     })
 

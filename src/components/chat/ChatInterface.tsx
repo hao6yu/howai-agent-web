@@ -9,6 +9,9 @@ import ChatMessage from './ChatMessage'
 import SettingsModal from '../settings/SettingsModal'
 import FontSizeControl from '../ui/FontSizeControl'
 import { getTimeAgo, formatDate } from '@/utils/timeHelpers'
+import { persistImageAttachmentUrl } from '@/lib/chat/attachments'
+import { appendAssistantContent } from '@/lib/chat/streaming'
+import { readChatStream } from './hooks/useChatStreaming'
 
 export default function ChatInterface() {
   const { user } = useAuth()
@@ -47,6 +50,8 @@ export default function ChatInterface() {
   const thinkingDelayRef = useRef<NodeJS.Timeout | null>(null)
   const isProcessingRef = useRef<boolean>(false)
   const dropZoneRef = useRef<HTMLDivElement>(null)
+  const previewUrlsRef = useRef<string[]>([])
+  const pdfPreviewUrlsRef = useRef<string[]>([])
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -171,6 +176,18 @@ export default function ChatInterface() {
     setPreviewUrls(prev => prev.filter((_, i) => i !== index))
   }
 
+  const clearComposerAttachments = useCallback(() => {
+    setPreviewUrls((existingUrls) => {
+      existingUrls.forEach((url) => {
+        if (url && url.startsWith('blob:')) {
+          URL.revokeObjectURL(url)
+        }
+      })
+      return []
+    })
+    setAttachedFiles([])
+  }, [])
+
   const handleImageClick = () => {
     imageInputRef.current?.click()
     setShowAttachmentMenu(false)
@@ -234,6 +251,7 @@ export default function ChatInterface() {
       const canvas = document.createElement('canvas')
       const ctx = canvas.getContext('2d')
       const img = new Image()
+      const sourceUrl = URL.createObjectURL(file)
 
       img.onload = () => {
         // Calculate new dimensions (max 1024px on longest side)
@@ -259,13 +277,17 @@ export default function ChatInterface() {
         // Convert to base64 with compression (0.8 quality for JPEG)
         const quality = file.type === 'image/png' ? 1.0 : 0.8
         const compressedDataUrl = canvas.toDataURL('image/jpeg', quality)
+        URL.revokeObjectURL(sourceUrl)
 
         // Remove data:image/jpeg;base64, prefix
         resolve(compressedDataUrl.split(',')[1])
       }
 
-      img.onerror = () => reject(new Error('Failed to load image'))
-      img.src = URL.createObjectURL(file)
+      img.onerror = () => {
+        URL.revokeObjectURL(sourceUrl)
+        reject(new Error('Failed to load image'))
+      }
+      img.src = sourceUrl
     })
   }
 
@@ -291,6 +313,34 @@ export default function ChatInterface() {
   useEffect(() => {
     scrollToBottom()
   }, [messages])
+
+  useEffect(() => {
+    previewUrlsRef.current = previewUrls
+  }, [previewUrls])
+
+  useEffect(() => {
+    pdfPreviewUrlsRef.current = pdfPreviewUrls
+  }, [pdfPreviewUrls])
+
+  useEffect(() => {
+    return () => {
+      previewUrlsRef.current.forEach((url) => {
+        if (url && url.startsWith('blob:')) {
+          URL.revokeObjectURL(url)
+        }
+      })
+
+      pdfPreviewUrlsRef.current.forEach((url) => {
+        if (url && url.startsWith('blob:')) {
+          URL.revokeObjectURL(url)
+        }
+      })
+
+      if (requestControllerRef.current) {
+        requestControllerRef.current.abort()
+      }
+    }
+  }, [])
 
   // Close attachment menu when clicking outside
   useEffect(() => {
@@ -622,6 +672,12 @@ export default function ChatInterface() {
 
         setPinnedConversations(pinned)
         setConversations(regular)
+        setCurrentConversation((previousCurrent) => {
+          if (!previousCurrent) {
+            return previousCurrent
+          }
+          return allConversations.find((conv) => conv.id === previousCurrent.id) || previousCurrent
+        })
       }
     } catch (error) {
       console.error('Error loading conversations:', error)
@@ -769,6 +825,20 @@ export default function ChatInterface() {
   }
 
   const sendMessage = async () => {
+    type ChatAttachmentPayload =
+      | {
+          type: 'image'
+          name: string
+          mimeType: string
+          data: string
+        }
+      | {
+          type: 'document'
+          name: string
+          mimeType: string
+          content: string
+        }
+
     console.log('Send message clicked', {
       hasMessage: !!currentMessage.trim(),
       hasConversation: !!currentConversation,
@@ -781,10 +851,8 @@ export default function ChatInterface() {
       return
     }
 
-    // If no current conversation, create a new one
     let conversationToUse = currentConversation
     if (!conversationToUse) {
-      console.log('No current conversation, creating new one...')
       conversationToUse = await createNewConversation()
       if (!conversationToUse) {
         console.error('Failed to create new conversation')
@@ -793,73 +861,71 @@ export default function ChatInterface() {
       setCurrentConversation(conversationToUse)
     }
 
-    // Prevent duplicate processing
     if (isProcessingRef.current) {
       console.log('[Chat] Already processing a request, ignoring duplicate')
       return
     }
     isProcessingRef.current = true
 
-    // Add a realistic delay before showing "AI is thinking" - makes conversation feel more natural
     thinkingDelayRef.current = setTimeout(() => {
-      if (isProcessingRef.current) { // Only show if still processing
+      if (isProcessingRef.current) {
         setLoading(true)
       }
       thinkingDelayRef.current = null
-    }, 800) // 0.8 second delay for natural conversation flow
+    }, 800)
 
     try {
-      // Check if this is the first message in the conversation BEFORE adding it
       const isFirstMessage = messages.length === 0
+      const messageToSend = currentMessage.trim()
+      const attachmentsToSend: ChatAttachmentPayload[] = []
+      const encodedImageMap = new Map<File, string>()
 
-      // Prepare attachments for API
-      const attachments = []
-      for (let i = 0; i < attachedFiles.length; i++) {
-        const file = attachedFiles[i]
+      for (const file of attachedFiles) {
         if (file.type.startsWith('image/')) {
           const base64 = await fileToBase64(file)
-          attachments.push({
+          encodedImageMap.set(file, base64)
+          attachmentsToSend.push({
             type: 'image',
             name: file.name,
             mimeType: file.type,
             data: base64
           })
-        } else {
-          // For non-image files, read as text or send file info
-          const text = await file.text()
-          attachments.push({
-            type: 'document',
-            name: file.name,
-            mimeType: file.type,
-            content: text.substring(0, 10000) // Limit to 10k chars
-          })
+          continue
         }
+
+        const text = await file.text()
+        attachmentsToSend.push({
+          type: 'document',
+          name: file.name,
+          mimeType: file.type,
+          content: text.substring(0, 10000)
+        })
       }
 
-      // Create image URLs for attached images
       const attachedImageUrls: string[] = []
-      for (let i = 0; i < attachedFiles.length; i++) {
-        const file = attachedFiles[i]
-        if (file.type.startsWith('image/')) {
-          // Create object URL for immediate display
-          const objectUrl = URL.createObjectURL(file)
-          attachedImageUrls.push(objectUrl)
+      for (const file of attachedFiles) {
+        if (!file.type.startsWith('image/')) {
+          continue
         }
+
+        const persistedUrl = await persistImageAttachmentUrl({
+          supabase,
+          userId: user.id,
+          conversationId: conversationToUse.id,
+          file,
+          fallbackProvider: async () => {
+            const base64 = encodedImageMap.get(file) ?? (await fileToBase64(file))
+            return `data:image/jpeg;base64,${base64}`
+          }
+        })
+        attachedImageUrls.push(persistedUrl)
       }
 
-      // Create display content for user message (without file list for now)
-      let displayContent = currentMessage
-
-      // Store the message and attachments for API call
-      const messageToSend = currentMessage
-      const attachmentsToSend = [...attachments]
-
-      // Add user message to database
       const { data: userMessage } = await supabase
         .from('messages')
         .insert({
           conversation_id: conversationToUse.id,
-          content: displayContent || '📎 Attached files',
+          content: messageToSend || '📎 Attached files',
           is_ai: false,
           image_urls: attachedImageUrls.length > 0 ? attachedImageUrls : null
         })
@@ -867,198 +933,129 @@ export default function ChatInterface() {
         .single()
 
       if (userMessage) {
-        setMessages(prev => [...prev, userMessage])
+        setMessages((prev) => [...prev, userMessage])
       }
 
-      // Clear input and attachments
       setCurrentMessage('')
-      setAttachedFiles([])
-      setPreviewUrls([])
+      clearComposerAttachments()
 
-      // Call OpenAI API
+      const requestBody = {
+        message: messageToSend,
+        conversationId: conversationToUse.id,
+        deepResearch: deepResearchMode,
+        attachments: attachmentsToSend,
+        generateTitle: isFirstMessage,
+        allowWebSearch: webSearchEnabled,
+        enableAIWebSearchDetection: !webSearchEnabled
+      }
+
+      if (requestControllerRef.current) {
+        requestControllerRef.current.abort()
+      }
+      requestControllerRef.current = new AbortController()
+
+      const timeoutId = setTimeout(() => {
+        console.log('[Chat] Request timeout - aborting after 4 minutes')
+        requestControllerRef.current?.abort()
+      }, 240000)
+
       try {
-        const requestBody = {
-          message: messageToSend,
-          conversationId: conversationToUse.id,
-          deepResearch: deepResearchMode,
-          attachments: attachmentsToSend,
-          generateTitle: isFirstMessage,
-          allowWebSearch: webSearchEnabled, // Use the toggle state
-          enableAIWebSearchDetection: !webSearchEnabled, // Enable AI detection when toggle is off
-        }
+        const needsToolingTransport = webSearchEnabled || /\b(weather|stock|price|news|exchange rate|latest|today|current|draw|image|picture|artwork|generate)\b/i.test(messageToSend)
+        const useStreamTransport = !needsToolingTransport
+        const endpoint = useStreamTransport ? '/api/chat/stream' : '/api/chat'
 
-        console.log('Sending API request:', {
-          messageLength: messageToSend?.length,
-          generateTitle: isFirstMessage,
-          conversationId: conversationToUse.id,
-          attachmentsCount: attachmentsToSend.length
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(requestBody),
+          signal: requestControllerRef.current.signal
         })
-
-        // Create AbortController for timeout handling (use persistent ref)
-        if (requestControllerRef.current) {
-          requestControllerRef.current.abort() // Cancel any previous request
-        }
-        requestControllerRef.current = new AbortController()
-
-        const timeoutId = setTimeout(() => {
-          console.log('[Chat] Request timeout - aborting after 4 minutes')
-          requestControllerRef.current?.abort()
-        }, 240000) // 4 minute timeout (doubled)
-
-        let response: Response
-        try {
-          response = await fetch('/api/chat', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(requestBody),
-            signal: requestControllerRef.current.signal,
-          })
-          clearTimeout(timeoutId)
-          requestControllerRef.current = null // Clear successful request
-          console.log('[Chat] Request completed successfully')
-        } catch (fetchError) {
-          clearTimeout(timeoutId)
-
-          console.log('[Chat] Fetch error occurred:', {
-            name: fetchError instanceof Error ? fetchError.name : 'Unknown',
-            message: fetchError instanceof Error ? fetchError.message : 'Unknown error',
-            type: typeof fetchError,
-            constructor: fetchError instanceof Error ? fetchError.constructor.name : 'Unknown'
-          })
-
-          // Handle abort specifically
-          if (fetchError instanceof Error && fetchError.name === 'AbortError') {
-            console.log('[Chat] AbortError detected - but backend might still be processing')
-
-            // Don't show error immediately - the request might have completed on backend
-            // Show a different message and check for completion
-            const checkMessage = {
-              id: `checking-${Date.now()}`,
-              conversation_id: conversationToUse.id,
-              content: 'Processing your request... This may take a moment for image generation.',
-              is_ai: true,
-              created_at: new Date().toISOString()
-            }
-            setMessages(prev => [...prev, checkMessage])
-
-            // Check if the request completed on the backend after a delay
-            setTimeout(async () => {
-              console.log('[Chat] Checking if message was saved despite abort...')
-              await loadConversations()
-
-              // Remove the checking message
-              setMessages(prev => prev.filter(msg => msg.id !== checkMessage.id))
-            }, 3000)
-
-            return // Don't throw error, let the check handle it
-          }
-
-          // For non-abort errors, still check if backend completed
-          console.log('[Chat] Non-abort error - backend might still be processing')
-
-          // Wait a bit and check if the request completed on backend
-          setTimeout(async () => {
-            console.log('[Chat] Checking if request completed despite frontend error...')
-            await loadConversations()
-          }, 2000)
-
-          throw fetchError
-        }
 
         if (!response.ok) {
           throw new Error('Failed to get AI response')
         }
 
-        const data = await response.json()
+        if (useStreamTransport) {
+          const streamingMessageId = `streaming-${Date.now()}`
+          let sawContent = false
 
-        console.log('API Response:', { hasMessage: !!data.message, title: data.title, isFirstMessage })
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: streamingMessageId,
+              conversation_id: conversationToUse.id,
+              content: '',
+              is_ai: true,
+              created_at: new Date().toISOString()
+            }
+          ])
 
-        if (data.message) {
-          setMessages(prev => [...prev, data.message])
-        }
+          await readChatStream({
+            response,
+            onEvent: (event) => {
+              if (event.type === 'content') {
+                sawContent = true
+                if (thinkingDelayRef.current) {
+                  clearTimeout(thinkingDelayRef.current)
+                  thinkingDelayRef.current = null
+                }
+                setLoading(false)
+                setMessages((prev) =>
+                  prev.map((message) =>
+                    message.id === streamingMessageId
+                      ? { ...message, content: appendAssistantContent(message.content, event.content) }
+                      : message
+                  )
+                )
+              }
+            }
+          })
 
-        // Update conversation title if generated
-        if (data.title && conversationToUse) {
-          console.log('Updating conversation title to:', data.title)
-          setCurrentConversation(prev => prev ? { ...prev, title: data.title } : null)
-
-          // Update the conversation in both pinned and regular lists
-          setPinnedConversations(prev =>
-            prev.map(conv =>
-              conv.id === conversationToUse.id
-                ? { ...conv, title: data.title, updated_at: new Date().toISOString() }
-                : conv
-            )
-          )
-          setConversations(prev =>
-            prev.map(conv =>
-              conv.id === conversationToUse.id
-                ? { ...conv, title: data.title, updated_at: new Date().toISOString() }
-                : conv
-            )
-          )
-
-          // Also refresh from database to ensure consistency
-          await loadConversations()
-        }
-      } catch (apiError) {
-        console.error('Error calling chat API:', apiError)
-        console.error('Error details:', {
-          name: apiError instanceof Error ? apiError.name : 'Unknown',
-          message: apiError instanceof Error ? apiError.message : 'Unknown error',
-          stack: apiError instanceof Error ? apiError.stack : 'No stack trace'
-        })
-
-        // Determine error message based on error type
-        let errorContent = 'Sorry, I encountered an error processing your message. Please try again.'
-
-        if (apiError instanceof Error) {
-          if (apiError.name === 'AbortError') {
-            console.log('[Chat] Request aborted - this was likely a timeout or user navigation')
-            errorContent = 'Request timed out after 4 minutes. This can happen with complex image generation - please try again.'
-          } else if (apiError.message.includes('timeout')) {
-            console.log('[Chat] Timeout error detected')
-            errorContent = 'Request took too long to complete. Please try again.'
-          } else if (apiError.message.includes('Failed to fetch')) {
-            console.log('[Chat] Network error detected')
-            errorContent = 'Network error. Please check your connection and try again.'
-          } else {
-            console.log('[Chat] Unknown error type:', apiError.message)
+          if (!sawContent) {
+            setMessages((prev) => prev.filter((message) => message.id !== streamingMessageId))
           }
+        } else {
+          await response.json()
         }
 
-        // Add error message to chat
-        const errorMessage = {
-          id: `error-${Date.now()}`,
-          conversation_id: conversationToUse.id,
-          content: errorContent,
-          is_ai: true,
-          created_at: new Date().toISOString()
-        }
-        setMessages(prev => [...prev, errorMessage])
+        await Promise.all([
+          loadMessages(conversationToUse.id),
+          loadConversations()
+        ])
       } finally {
-        // Clear the thinking delay if still pending and set loading to false
-        if (thinkingDelayRef.current) {
-          clearTimeout(thinkingDelayRef.current)
-          thinkingDelayRef.current = null
+        clearTimeout(timeoutId)
+        requestControllerRef.current = null
+      }
+    } catch (apiError) {
+      console.error('Error calling chat API:', apiError)
+
+      let errorContent = 'Sorry, I encountered an error processing your message. Please try again.'
+      if (apiError instanceof Error) {
+        if (apiError.name === 'AbortError') {
+          errorContent = 'Request timed out after 4 minutes. Please try again.'
+        } else if (apiError.message.includes('Failed to fetch')) {
+          errorContent = 'Network error. Please check your connection and try again.'
         }
-        setLoading(false)
-        isProcessingRef.current = false // Clear processing flag
-        console.log('[Chat] Processing completed, flag cleared')
       }
 
-    } catch (error) {
-      console.error('Error sending message:', error)
-      // Clear the thinking delay if still pending
+      const errorMessage = {
+        id: `error-${Date.now()}`,
+        conversation_id: conversationToUse.id,
+        content: errorContent,
+        is_ai: true,
+        created_at: new Date().toISOString()
+      }
+      setMessages((prev) => [...prev, errorMessage])
+    } finally {
       if (thinkingDelayRef.current) {
         clearTimeout(thinkingDelayRef.current)
         thinkingDelayRef.current = null
       }
       setLoading(false)
-      isProcessingRef.current = false // Clear processing flag
-      console.log('[Chat] Error occurred, processing flag cleared')
+      isProcessingRef.current = false
+      requestControllerRef.current = null
     }
   }
 

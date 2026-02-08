@@ -1,4 +1,5 @@
 import { createClient } from '@/lib/supabase-server'
+import { isWebPortalUnrestricted } from '@/lib/chat/accessPolicy'
 
 export interface AIPersonalityConfig {
   id?: string
@@ -331,9 +332,7 @@ export class AIPersonalityConfigService {
   /**
    * Check if user has premium features for personality customization
    */
-  static async canCustomizePersonality(userId: string): Promise<boolean> {
-    // TODO: Implement subscription checking
-    // For now, return true for all users or check a subscription table
-    return true
+  static async canCustomizePersonality(_userId: string): Promise<boolean> {
+    return isWebPortalUnrestricted()
   }
 }
