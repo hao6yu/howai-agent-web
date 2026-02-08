@@ -1,17 +1,20 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Send, Plus, Paperclip, X, Pin, PinOff, MessageSquare, Settings, Trash2, Search, Menu, XCircle, Moon, Sun, MessageSquarePlus, Globe, SearchCheck, FileText, ChevronUp, ChevronDown } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { useAuth } from '@/hooks/useAuth'
 import { Message, Conversation } from '@/types/chat'
-import ChatMessage from './ChatMessage'
 import SettingsModal from '../settings/SettingsModal'
-import FontSizeControl from '../ui/FontSizeControl'
 import { getTimeAgo, formatDate } from '@/utils/timeHelpers'
 import { compressAndConvertImage, convertHeicToJpeg, fileToBase64 } from './lib/fileProcessing'
 import { useAttachmentComposer } from './hooks/useAttachmentComposer'
 import { useChatSend } from './hooks/useChatSend'
+import { ChatSidebar, ChatSidebarOverlay } from './components/ChatSidebar'
+import ChatHeader from './components/ChatHeader'
+import ChatMessagesPanel from './components/ChatMessagesPanel'
+import ChatComposer from './components/ChatComposer'
+import DragDropOverlay from './components/DragDropOverlay'
+import PdfConverterModal from './components/PdfConverterModal'
 
 export default function ChatInterface() {
   const { user } = useAuth()
@@ -563,219 +566,44 @@ export default function ChatInterface() {
   // Total filtered conversations for "no results" message
   const totalFilteredConversations = filteredPinnedConversations.length + filteredUnpinnedConversations.length
 
+  const closePdfConverter = () => {
+    setShowPdfConverter(false)
+    pdfPreviewUrls.forEach((url) => URL.revokeObjectURL(url))
+    setPdfImages([])
+    setPdfPreviewUrls([])
+  }
+
   return (
     <div className={`flex h-screen transition-colors duration-200 ${darkMode ? 'bg-gray-900' : 'bg-gray-50'}`}>
-      {/* Mobile Sidebar Overlay */}
-      {sidebarOpen && (
-        <div
-          className="fixed inset-0 bg-black bg-opacity-50 z-40 lg:hidden"
-          onClick={() => setSidebarOpen(false)}
-        />
-      )}
+      <ChatSidebarOverlay
+        sidebarOpen={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
+      />
 
-      {/* Left Sidebar */}
-      <div className={`
-        fixed lg:relative lg:translate-x-0
-        ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
-        w-80 ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'} border-r flex flex-col flex-shrink-0
-        transition-all duration-300 ease-in-out z-50 lg:z-auto
-        h-full lg:flex
-      `}>
-        {/* Sidebar Header */}
-        <div className={`p-4 border-b ${darkMode ? 'border-gray-700' : 'border-gray-200'}`}>
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center space-x-3">
-              <div className="w-8 h-8 flex items-center justify-center">
-                <img
-                  src="/howai-icon.png"
-                  alt="HowAI"
-                  className="w-8 h-8 rounded-lg"
-                />
-              </div>
-              <h1 className={`text-lg font-semibold ${darkMode ? 'text-white' : 'text-gray-900'}`}>HowAI</h1>
-            </div>
-            <div className="flex items-center space-x-2">
-              <button
-                onClick={() => {
-                  setCurrentConversation(null)
-                  setMessages([])
-                }}
-                className={`p-2 rounded-md transition-colors ${darkMode ? 'text-gray-400 hover:text-white hover:bg-gray-700' : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'}`}
-                title="New conversation"
-              >
-                <MessageSquarePlus className="w-5 h-5" />
-              </button>
-            </div>
-          </div>
+      <ChatSidebar
+        darkMode={darkMode}
+        sidebarOpen={sidebarOpen}
+        userEmail={user.email}
+        searchQuery={searchQuery}
+        onSearchQueryChange={setSearchQuery}
+        onClearSearch={() => setSearchQuery('')}
+        currentConversationId={currentConversationId}
+        filteredPinnedConversations={filteredPinnedConversations}
+        filteredUnpinnedConversations={filteredUnpinnedConversations}
+        totalFilteredConversations={totalFilteredConversations}
+        onSwitchConversation={switchToConversation}
+        onTogglePin={togglePin}
+        onDeleteConversation={deleteConversation}
+        onNewConversation={() => {
+          setCurrentConversation(null)
+          setMessages([])
+        }}
+        onOpenSettings={() => setSettingsOpen(true)}
+        onLogout={logout}
+        formatDate={formatDate}
+        getTimeAgo={getTimeAgo}
+      />
 
-          {/* Search Bar */}
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
-            <input
-              type="text"
-              placeholder="Search conversations..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className={`w-full pl-10 pr-10 py-2 text-sm rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder-gray-400' : 'bg-gray-50 border-gray-200 text-gray-900 placeholder-gray-500'}`}
-            />
-            {searchQuery && (
-              <button
-                onClick={() => setSearchQuery('')}
-                className={`absolute right-3 top-1/2 transform -translate-y-1/2 transition-colors ${darkMode ? 'text-gray-500 hover:text-gray-300' : 'text-gray-400 hover:text-gray-600'}`}
-                title="Clear search"
-              >
-                <XCircle className="w-4 h-4" />
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Conversations List */}
-        <div className="flex-1 overflow-y-auto">
-          {/* Pinned Conversations */}
-          {filteredPinnedConversations.length > 0 && (
-            <div className="p-3">
-              <h3 className={`text-xs font-medium uppercase tracking-wider mb-2 px-2 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                Pinned
-              </h3>
-              <div className="space-y-1">
-                {filteredPinnedConversations.map((conv) => (
-                  <div
-                    key={conv.id}
-                    className={`group px-3 py-2 text-sm rounded-md cursor-pointer transition-colors ${
-                      currentConversationId === conv.id
-                        ? darkMode ? 'bg-blue-900 text-blue-300' : 'bg-blue-50 text-blue-700'
-                        : darkMode ? 'text-gray-300 hover:bg-gray-700' : 'text-gray-700 hover:bg-gray-50'
-                    }`}
-                    onClick={() => switchToConversation(conv)}
-                    title={`Created ${formatDate(conv.created_at)}`}
-                  >
-                    <div className="flex items-center">
-                      <Pin className="w-4 h-4 mr-2 text-yellow-500 flex-shrink-0" />
-                      <div className="flex-1 min-w-0">
-                        <div className="truncate">{conv.title}</div>
-                        <div className={`text-xs mt-0.5 ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
-                          {getTimeAgo(conv.created_at)}
-                        </div>
-                      </div>
-                      <div className="flex items-center space-x-1 opacity-0 group-hover:opacity-100 transition-opacity ml-2">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            togglePin(conv)
-                          }}
-                          className={`p-1 rounded ${darkMode ? 'text-gray-500 hover:text-gray-300' : 'text-gray-400 hover:text-gray-600'}`}
-                          title="Unpin"
-                        >
-                          <PinOff className="w-3 h-3" />
-                        </button>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            deleteConversation(conv)
-                          }}
-                          className="p-1 text-gray-400 hover:text-red-500 rounded"
-                          title="Delete"
-                        >
-                          <Trash2 className="w-3 h-3" />
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Regular Conversations */}
-          <div className="p-3">
-            {filteredPinnedConversations.length > 0 && (
-              <h3 className={`text-xs font-medium uppercase tracking-wider mb-2 px-2 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                Recent
-              </h3>
-            )}
-            <div className="space-y-1">
-              {filteredUnpinnedConversations.map((conv) => (
-                <div
-                  key={conv.id}
-                  className={`group px-3 py-2 text-sm rounded-md cursor-pointer transition-colors ${
-                    currentConversationId === conv.id
-                      ? darkMode ? 'bg-blue-900 text-blue-300' : 'bg-blue-50 text-blue-700'
-                      : darkMode ? 'text-gray-300 hover:bg-gray-700' : 'text-gray-700 hover:bg-gray-50'
-                  }`}
-                  onClick={() => switchToConversation(conv)}
-                  title={`Created ${formatDate(conv.created_at)}`}
-                >
-                  <div className="flex items-center">
-                    <MessageSquare className="w-4 h-4 mr-2 text-gray-400 flex-shrink-0" />
-                    <div className="flex-1 min-w-0">
-                      <div className="truncate">{conv.title}</div>
-                      <div className={`text-xs mt-0.5 ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
-                        {getTimeAgo(conv.created_at)}
-                      </div>
-                    </div>
-                    <div className="flex items-center space-x-1 opacity-0 group-hover:opacity-100 transition-opacity ml-2">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          togglePin(conv)
-                        }}
-                        className="p-1 text-gray-400 hover:text-yellow-500 rounded"
-                        title="Pin"
-                      >
-                        <Pin className="w-3 h-3" />
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          deleteConversation(conv)
-                        }}
-                        className="p-1 text-gray-400 hover:text-red-500 rounded"
-                        title="Delete"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            {/* No results message */}
-            {searchQuery.trim() && totalFilteredConversations === 0 && (
-              <div className={`text-center py-8 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                <Search className={`w-8 h-8 mx-auto mb-2 ${darkMode ? 'text-gray-500' : 'text-gray-400'}`} />
-                <p className="text-sm">No conversations found</p>
-                <p className={`text-xs ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>Try a different search term</p>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Settings Panel */}
-        <div className={`p-3 border-t ${darkMode ? 'border-gray-700' : 'border-gray-200'}`}>
-          <div className={`text-xs mb-3 px-3 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-            {user?.email}
-          </div>
-
-          <button
-            onClick={() => setSettingsOpen(true)}
-            className={`w-full flex items-center px-3 py-2 text-sm rounded-md transition-colors ${darkMode ? 'text-gray-300 hover:bg-gray-700' : 'text-gray-700 hover:bg-gray-50'}`}
-          >
-            <Settings className="w-4 h-4 mr-2" />
-            Settings
-          </button>
-          <button
-            onClick={logout}
-            className={`w-full flex items-center px-3 py-2 text-sm rounded-md transition-colors mt-1 ${darkMode ? 'text-gray-300 hover:bg-gray-700' : 'text-gray-700 hover:bg-gray-50'}`}
-          >
-            <span className="w-4 h-4 mr-2">↗</span>
-            Logout
-          </button>
-        </div>
-      </div>
-
-      {/* Main Chat Area */}
       <div
         className="flex-1 flex flex-col relative"
         onDragEnter={handleDragEnter}
@@ -783,503 +611,66 @@ export default function ChatInterface() {
         onDragOver={handleDragOver}
         onDrop={handleDrop}
       >
-        {/* Header */}
-        <div className={`border-b px-2 sm:px-4 lg:px-6 py-3 sm:py-4 ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-2 sm:space-x-3">
-              {/* Mobile Menu Button */}
-              <button
-                onClick={() => setSidebarOpen(true)}
-                className={`p-2 rounded-md lg:hidden ${darkMode ? 'text-gray-400 hover:text-white hover:bg-gray-700' : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'}`}
-              >
-                <Menu className="w-5 h-5" />
-              </button>
-              {/* Mobile App Icon */}
-              <div className="w-8 h-8 flex items-center justify-center lg:hidden">
-                <img
-                  src="/howai-icon.png"
-                  alt="HowAI"
-                  className="w-8 h-8 rounded-lg"
-                />
-              </div>
-              <div>
-                <h2 className={`text-lg font-semibold ${darkMode ? 'text-white' : 'text-gray-900'}`}>
-                  {currentConversation?.title || 'HowAI'}
-                </h2>
-              </div>
-            </div>
-            <div className="flex items-center space-x-2 sm:space-x-4">
-              {deepResearchMode && (
-                <div className={`flex items-center space-x-2 px-3 py-1 rounded-full ${darkMode ? 'bg-purple-900 text-purple-300' : 'bg-purple-50 text-purple-700'}`}>
-                  <SearchCheck size={16} />
-                  <span className="text-sm font-medium hidden sm:inline">Deep Research</span>
-                </div>
-              )}
-              {webSearchEnabled && (
-                <div className={`flex items-center space-x-2 px-3 py-1 rounded-full ${darkMode ? 'bg-blue-900 text-blue-300' : 'bg-blue-50 text-blue-700'}`}>
-                  <Globe size={16} />
-                  <span className="text-sm font-medium hidden sm:inline">Web Search</span>
-                </div>
-              )}
+        <ChatHeader
+          darkMode={darkMode}
+          currentConversationTitle={currentConversation?.title || null}
+          deepResearchMode={deepResearchMode}
+          webSearchEnabled={webSearchEnabled}
+          onOpenSidebar={() => setSidebarOpen(true)}
+          onToggleDarkMode={() => setDarkMode(!darkMode)}
+        />
 
-              {/* Font Size Controls */}
-              <FontSizeControl darkMode={darkMode} inline={true} />
+        <ChatMessagesPanel
+          messages={messages}
+          darkMode={darkMode}
+          loading={loading}
+          messagesEndRef={messagesEndRef}
+        />
 
-              {/* Dark Mode Toggle */}
-              <button
-                onClick={() => setDarkMode(!darkMode)}
-                className={`p-2 rounded-lg transition-colors ${
-                  darkMode
-                    ? 'text-white hover:bg-gray-700 hover:text-gray-200'
-                    : 'text-gray-600 hover:bg-gray-100 hover:text-gray-800'
-                }`}
-                title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
-              >
-                {darkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
-              </button>
-            </div>
-          </div>
-        </div>
+        <ChatComposer
+          darkMode={darkMode}
+          attachedFiles={attachedFiles}
+          previewUrls={previewUrls}
+          currentMessage={currentMessage}
+          loading={loading}
+          showAttachmentMenu={showAttachmentMenu}
+          webSearchEnabled={webSearchEnabled}
+          deepResearchMode={deepResearchMode}
+          attachmentMenuRef={attachmentMenuRef}
+          fileInputRef={fileInputRef}
+          imageInputRef={imageInputRef}
+          pdfImageInputRef={pdfImageInputRef}
+          onCurrentMessageChange={setCurrentMessage}
+          onKeyDown={handleKeyDown}
+          onSendMessage={sendMessage}
+          onRemoveFile={removeFile}
+          onToggleAttachmentMenu={toggleAttachmentMenu}
+          onImageClick={handleImageClick}
+          onFileClick={handleFileClick}
+          onPdfConverterClick={handlePdfConverterClick}
+          onWebSearchToggle={() => setWebSearchEnabled(!webSearchEnabled)}
+          onDeepResearchToggle={() => setDeepResearchMode(!deepResearchMode)}
+          onFileUpload={handleFileUpload}
+          onPdfImageUpload={handlePdfImageUpload}
+        />
 
-        {/* Messages */}
-        <div className="flex-1 overflow-y-auto">
-          <div className="w-full px-2 sm:px-4 lg:px-6">
-            {messages.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full text-center px-2 sm:px-6">
-                  <div className="w-20 h-20 flex items-center justify-center mb-6">
-                    <img
-                      src="/howai-icon.png"
-                      alt="HowAI"
-                      className="w-20 h-20 rounded-3xl"
-                    />
-                  </div>
-                  <h2 className={`text-2xl sm:text-3xl font-bold mb-3 ${darkMode ? 'text-white' : 'text-gray-900'}`}>Welcome to HowAI</h2>
-                  <p className={`text-base sm:text-lg mb-8 max-w-2xl leading-relaxed ${darkMode ? 'text-gray-300' : 'text-gray-600'}`}>
-                    Your intelligent AI assistant with powerful capabilities. I can chat, research, analyze, create, and help you accomplish any task.
-                  </p>
-
-                  {/* Feature Grid */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 w-full max-w-4xl mb-8">
-                    <div className={`p-5 rounded-xl border ${darkMode ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-200'}`}>
-                      <div className="text-2xl mb-3">💬</div>
-                      <h3 className={`font-semibold mb-2 ${darkMode ? 'text-white' : 'text-gray-900'}`}>Smart Conversations</h3>
-                      <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>Ask me anything - from complex questions to casual chat</p>
-                    </div>
-
-                    <div className={`p-5 rounded-xl border ${darkMode ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-200'}`}>
-                      <div className="text-2xl mb-3">🧠</div>
-                      <h3 className={`font-semibold mb-2 ${darkMode ? 'text-white' : 'text-gray-900'}`}>Deep Research</h3>
-                      <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>Comprehensive analysis and in-depth research on any topic</p>
-                    </div>
-
-                    <div className={`p-5 rounded-xl border ${darkMode ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-200'}`}>
-                      <div className="text-2xl mb-3">🌐</div>
-                      <h3 className={`font-semibold mb-2 ${darkMode ? 'text-white' : 'text-gray-900'}`}>Web Search</h3>
-                      <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>Get real-time information from across the internet</p>
-                    </div>
-
-                    <div className={`p-5 rounded-xl border ${darkMode ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-200'}`}>
-                      <div className="text-2xl mb-3">📷</div>
-                      <h3 className={`font-semibold mb-2 ${darkMode ? 'text-white' : 'text-gray-900'}`}>Photo Analysis</h3>
-                      <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>Understand and analyze images, photos, and visual content</p>
-                    </div>
-
-                    <div className={`p-5 rounded-xl border ${darkMode ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-200'}`}>
-                      <div className="text-2xl mb-3">🎨</div>
-                      <h3 className={`font-semibold mb-2 ${darkMode ? 'text-white' : 'text-gray-900'}`}>AI Artwork</h3>
-                      <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>Create stunning images and artwork from your descriptions</p>
-                    </div>
-
-                    <div className={`p-5 rounded-xl border ${darkMode ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-200'}`}>
-                      <div className="text-2xl mb-3">📄</div>
-                      <h3 className={`font-semibold mb-2 ${darkMode ? 'text-white' : 'text-gray-900'}`}>Document Work</h3>
-                      <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>Analyze, summarize, and work with your documents and files</p>
-                    </div>
-                  </div>
-
-                  {/* Quick Start Tips */}
-                  <div className={`rounded-xl p-6 max-w-3xl ${darkMode ? 'bg-gray-800/50 border border-gray-700' : 'bg-gray-50 border border-gray-200'}`}>
-                    <h3 className={`font-semibold mb-3 ${darkMode ? 'text-white' : 'text-gray-900'}`}>💡 Quick Tips</h3>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
-                      <div className={`flex items-center ${darkMode ? 'text-gray-300' : 'text-gray-600'}`}>
-                        <span className="mr-2">📎</span>
-                        <span>Drag & drop files or paste images directly</span>
-                      </div>
-                      <div className={`flex items-center ${darkMode ? 'text-gray-300' : 'text-gray-600'}`}>
-                        <span className="mr-2">🔍</span>
-                        <span>Toggle web search for current info</span>
-                      </div>
-                      <div className={`flex items-center ${darkMode ? 'text-gray-300' : 'text-gray-600'}`}>
-                        <span className="mr-2">🧠</span>
-                        <span>Enable deep research for complex topics</span>
-                      </div>
-                      <div className={`flex items-center ${darkMode ? 'text-gray-300' : 'text-gray-600'}`}>
-                        <span className="mr-2">🎯</span>
-                        <span>Ask me to "draw" or "create" for artwork</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-            ) : (
-              <div className="py-3 sm:py-6">
-                {messages.map((message) => (
-                  <ChatMessage key={message.id} message={message} darkMode={darkMode} />
-                ))}
-                {loading && (
-                  <div className="py-2 sm:py-4 w-full">
-                    <div className="w-full">
-                      <div className={`rounded-lg sm:rounded-2xl px-3 py-2 sm:py-3 shadow-sm max-w-[90%] sm:max-w-[80%] lg:max-w-3xl ${darkMode ? 'bg-gray-800' : 'bg-white'}`}>
-                        <div className="flex items-center space-x-2">
-                          <div className="flex space-x-1">
-                            <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
-                            <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '0.1s'}}></div>
-                            <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '0.2s'}}></div>
-                          </div>
-                          <span className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>Thinking...</span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
-                <div ref={messagesEndRef} />
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Input */}
-        <div className={`px-2 sm:px-4 lg:px-6 py-2 sm:py-4 border-t flex-shrink-0 ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
-          <div className="w-full">
-            <div className={`rounded-2xl p-2 sm:p-3 ${darkMode ? 'bg-gray-700' : 'bg-gray-100'}`}>
-            {/* File attachments preview */}
-            {attachedFiles.length > 0 && (
-              <div className="mb-3 flex flex-wrap gap-2">
-                {attachedFiles.map((file, index) => (
-                  <div key={index} className={`relative rounded-lg p-2 flex items-center space-x-2 max-w-full sm:max-w-xs ${darkMode ? 'bg-gray-600' : 'bg-white'}`}>
-                    {file.type.startsWith('image/') && previewUrls[index] ? (
-                      <img
-                        src={previewUrls[index]}
-                        alt={file.name}
-                        className="w-8 h-8 object-cover rounded"
-                      />
-                    ) : (
-                      <div className={`w-8 h-8 rounded flex items-center justify-center ${darkMode ? 'bg-gray-500' : 'bg-gray-200'}`}>
-                        <Paperclip size={16} className={darkMode ? 'text-gray-300' : 'text-gray-600'} />
-                      </div>
-                    )}
-                    <div className="flex-1 min-w-0">
-                      <p className={`text-sm font-medium truncate ${darkMode ? 'text-white' : 'text-gray-900'}`}>{file.name}</p>
-                      <p className={`text-xs ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>{(file.size / 1024).toFixed(1)} KB</p>
-                    </div>
-                    <button
-                      onClick={() => removeFile(index)}
-                      className={`p-1 rounded-full ${darkMode ? 'text-gray-400 hover:text-gray-200 hover:bg-gray-500' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'}`}
-                    >
-                      <X size={14} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Top row - Text input */}
-            <div className="mb-3">
-              <textarea
-                value={currentMessage}
-                onChange={(e) => setCurrentMessage(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder="Ask anything... paste images (Ctrl+V), attach files, or ask me to create artwork!"
-                className={`w-full bg-transparent resize-none focus:outline-none text-base leading-6 ${darkMode ? 'text-white placeholder-gray-400' : 'text-gray-900 placeholder-gray-500'}`}
-                rows={1}
-                disabled={loading}
-                style={{minHeight: '24px', maxHeight: '200px'}}
-                onInput={(e) => {
-                  const target = e.target as HTMLTextAreaElement;
-                  target.style.height = '24px';
-                  target.style.height = Math.min(target.scrollHeight, 200) + 'px';
-                }}
-              />
-            </div>
-
-            {/* Bottom row - Action buttons */}
-            <div className="flex items-center justify-between">
-              {/* Left side - Attachment and options */}
-              <div className="flex items-center space-x-1 sm:space-x-2">
-                {/* Attachment dropdown */}
-                <div className="relative" ref={attachmentMenuRef}>
-                  <button
-                    onClick={toggleAttachmentMenu}
-                    className={`p-3 sm:p-2 rounded-lg transition-colors flex items-center justify-center min-w-[44px] min-h-[44px] sm:min-w-[auto] sm:min-h-[auto] ${darkMode ? 'text-gray-400 hover:text-white hover:bg-gray-600' : 'text-gray-600 hover:text-gray-800 hover:bg-gray-200'}`}
-                    title="Add attachments"
-                  >
-                    <Plus size={18} />
-                  </button>
-
-                  {showAttachmentMenu && (
-                    <div className={`absolute bottom-full left-0 mb-2 rounded-lg shadow-lg border py-1 min-w-48 ${darkMode ? 'bg-gray-700 border-gray-600' : 'bg-white border-gray-200'}`}>
-                      <button
-                        onClick={handleImageClick}
-                        className={`w-full px-4 py-3 text-left text-sm transition-colors ${darkMode ? 'text-gray-300 hover:bg-gray-600' : 'text-gray-700 hover:bg-gray-50'}`}
-                      >
-                        📷 Upload photo
-                      </button>
-                      <button
-                        onClick={handleFileClick}
-                        className={`w-full px-4 py-3 text-left text-sm transition-colors ${darkMode ? 'text-gray-300 hover:bg-gray-600' : 'text-gray-700 hover:bg-gray-50'}`}
-                      >
-                        📄 Upload file
-                      </button>
-                      <button
-                        onClick={handlePdfConverterClick}
-                        className={`w-full px-4 py-3 text-left text-sm transition-colors ${darkMode ? 'text-gray-300 hover:bg-gray-600' : 'text-gray-700 hover:bg-gray-50'}`}
-                      >
-                        📄 Convert to PDF
-                      </button>
-                    </div>
-                  )}
-                </div>
-
-                {/* Web Search toggle */}
-                <button
-                  onClick={() => setWebSearchEnabled(!webSearchEnabled)}
-                  className={`p-3 sm:p-2 rounded-lg transition-colors flex items-center justify-center min-w-[44px] min-h-[44px] sm:min-w-[auto] sm:min-h-[auto] ${
-                    webSearchEnabled
-                      ? darkMode ? 'bg-blue-800 text-blue-300 hover:bg-blue-700' : 'bg-blue-200 text-blue-700 hover:bg-blue-300'
-                      : darkMode ? 'text-gray-400 hover:text-blue-400 hover:bg-blue-900' : 'text-gray-600 hover:text-blue-600 hover:bg-blue-100'
-                  }`}
-                  title={webSearchEnabled ? 'Disable Web Search' : 'Enable Web Search'}
-                >
-                  <Globe size={18} />
-                </button>
-
-                {/* Deep Research toggle */}
-                <button
-                  onClick={() => setDeepResearchMode(!deepResearchMode)}
-                  className={`p-3 sm:p-2 rounded-lg transition-colors flex items-center justify-center min-w-[44px] min-h-[44px] sm:min-w-[auto] sm:min-h-[auto] ${
-                    deepResearchMode
-                      ? darkMode ? 'bg-purple-800 text-purple-300 hover:bg-purple-700' : 'bg-purple-200 text-purple-700 hover:bg-purple-300'
-                      : darkMode ? 'text-gray-400 hover:text-purple-400 hover:bg-purple-900' : 'text-gray-600 hover:text-purple-600 hover:bg-purple-100'
-                  }`}
-                  title={deepResearchMode ? 'Disable Deep Research Mode' : 'Enable Deep Research Mode'}
-                >
-                  <SearchCheck size={18} />
-                </button>
-              </div>
-
-              {/* Right side - Send button */}
-              <div className="flex items-center">
-                <button
-                  onClick={sendMessage}
-                  disabled={loading || (!currentMessage.trim() && attachedFiles.length === 0)}
-                  className={`px-4 py-3 sm:py-2 rounded-lg font-medium transition-colors flex items-center space-x-2 min-h-[44px] ${
-                    (currentMessage.trim() || attachedFiles.length > 0) && !loading
-                      ? 'bg-blue-500 text-white hover:bg-blue-600'
-                      : 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                  }`}
-                >
-                  <Send size={16} />
-                  <span className="hidden sm:inline">Send</span>
-                </button>
-              </div>
-            </div>
-            </div>
-          </div>
-
-          {/* Hidden file inputs */}
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            accept=".pdf,.txt,.csv,.doc,.docx,.xls,.xlsx,.js,.ts,.py,.java,.cpp,.c,.h,.md,.json,.html,.css"
-            onChange={(e) => handleFileUpload(e.target.files)}
-            className="hidden"
-          />
-          <input
-            ref={imageInputRef}
-            type="file"
-            multiple
-            accept="image/*,.heic,.heif"
-            onChange={(e) => handleFileUpload(e.target.files)}
-            className="hidden"
-          />
-          <input
-            ref={pdfImageInputRef}
-            type="file"
-            multiple
-            accept="image/*,.heic,.heif"
-            onChange={(e) => handlePdfImageUpload(e.target.files)}
-            className="hidden"
-          />
-
-          {/* Drag and drop overlay */}
-          {isDragging && (
-            <div className="fixed inset-0 bg-blue-500 bg-opacity-20 flex items-center justify-center z-50 pointer-events-none">
-              <div className={`rounded-2xl p-8 shadow-2xl border-2 border-dashed border-blue-500 max-w-md mx-4 ${darkMode ? 'bg-gray-800' : 'bg-white'}`}>
-                <div className="text-center">
-                  <div className="w-16 h-16 mx-auto mb-4 bg-blue-100 rounded-full flex items-center justify-center">
-                    <svg
-                      className="w-8 h-8 text-blue-500"
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={2}
-                        d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
-                      />
-                    </svg>
-                  </div>
-                  <h3 className={`text-lg font-semibold mb-2 ${darkMode ? 'text-white' : 'text-gray-900'}`}>
-                    Drop files to upload
-                  </h3>
-                  <p className={`text-sm ${darkMode ? 'text-gray-300' : 'text-gray-600'}`}>
-                    Drop your photos or documents here to attach them to your message
-                  </p>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
+        <DragDropOverlay
+          darkMode={darkMode}
+          isDragging={isDragging}
+        />
       </div>
 
-      {/* PDF Converter Modal */}
-      {showPdfConverter && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className={`w-full max-w-4xl max-h-[90vh] rounded-2xl shadow-2xl overflow-hidden ${darkMode ? 'bg-gray-800' : 'bg-white'}`}>
-            {/* Header */}
-            <div className={`px-6 py-4 border-b ${darkMode ? 'border-gray-700' : 'border-gray-200'}`}>
-              <div className="flex items-center justify-between">
-                <div>
-                  <h2 className={`text-xl font-semibold ${darkMode ? 'text-white' : 'text-gray-900'}`}>Convert Images to PDF</h2>
-                  <p className={`text-sm mt-1 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>Select multiple images to combine into a single PDF document</p>
-                </div>
-                <button
-                  onClick={() => {
-                    setShowPdfConverter(false)
-                    // Clean up preview URLs
-                    pdfPreviewUrls.forEach(url => URL.revokeObjectURL(url))
-                    setPdfImages([])
-                    setPdfPreviewUrls([])
-                  }}
-                  className={`p-2 rounded-lg transition-colors ${darkMode ? 'text-gray-400 hover:text-white hover:bg-gray-700' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'}`}
-                >
-                  <X size={20} />
-                </button>
-              </div>
-            </div>
-
-            {/* Content */}
-            <div className="p-6 max-h-96 overflow-y-auto">
-              {pdfImages.length === 0 ? (
-                <div className="text-center py-12">
-                  <div className={`w-16 h-16 mx-auto mb-4 rounded-full flex items-center justify-center ${darkMode ? 'bg-gray-700' : 'bg-gray-100'}`}>
-                    <FileText className={`w-8 h-8 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`} />
-                  </div>
-                  <h3 className={`text-lg font-medium mb-2 ${darkMode ? 'text-white' : 'text-gray-900'}`}>No images selected</h3>
-                  <p className={`text-sm mb-6 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>Choose images to convert into a PDF document</p>
-                  <button
-                    onClick={() => pdfImageInputRef.current?.click()}
-                    className="bg-blue-500 text-white px-6 py-2 rounded-lg hover:bg-blue-600 transition-colors"
-                  >
-                    Select Images
-                  </button>
-                </div>
-              ) : (
-                <div>
-                  <div className="flex items-center justify-between mb-4">
-                    <p className={`text-sm ${darkMode ? 'text-gray-300' : 'text-gray-600'}`}>
-                      {pdfImages.length} image{pdfImages.length > 1 ? 's' : ''} selected
-                    </p>
-                    <button
-                      onClick={() => pdfImageInputRef.current?.click()}
-                      className={`text-sm px-3 py-1 rounded-md transition-colors ${darkMode ? 'text-blue-400 hover:bg-blue-900' : 'text-blue-600 hover:bg-blue-100'}`}
-                    >
-                      Add more images
-                    </button>
-                  </div>
-
-                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
-                    {pdfImages.map((file, index) => (
-                      <div key={index} className={`relative rounded-lg overflow-hidden ${darkMode ? 'bg-gray-700' : 'bg-gray-100'}`}>
-                        <img
-                          src={pdfPreviewUrls[index]}
-                          alt={file.name}
-                          className="w-full h-32 object-cover"
-                        />
-                        <div className="absolute inset-0 bg-black bg-opacity-0 hover:bg-opacity-20 transition-opacity flex items-start justify-end p-2">
-                          <div className="flex space-x-1">
-                            {index > 0 && (
-                              <button
-                                onClick={() => movePdfImage(index, index - 1)}
-                                className="bg-black bg-opacity-50 text-white p-1 rounded hover:bg-opacity-70 transition-opacity"
-                                title="Move up"
-                              >
-                                <ChevronUp size={12} />
-                              </button>
-                            )}
-                            {index < pdfImages.length - 1 && (
-                              <button
-                                onClick={() => movePdfImage(index, index + 1)}
-                                className="bg-black bg-opacity-50 text-white p-1 rounded hover:bg-opacity-70 transition-opacity"
-                                title="Move down"
-                              >
-                                <ChevronDown size={12} />
-                              </button>
-                            )}
-                            <button
-                              onClick={() => removePdfImage(index)}
-                              className="bg-red-500 bg-opacity-80 text-white p-1 rounded hover:bg-opacity-100 transition-opacity"
-                              title="Remove"
-                            >
-                              <X size={12} />
-                            </button>
-                          </div>
-                        </div>
-                        <div className={`absolute bottom-0 left-0 right-0 p-2 ${darkMode ? 'bg-gray-800' : 'bg-white'} bg-opacity-90`}>
-                          <p className={`text-xs truncate ${darkMode ? 'text-gray-300' : 'text-gray-600'}`}>{file.name}</p>
-                          <p className={`text-xs ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>Page {index + 1}</p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Footer */}
-            {pdfImages.length > 0 && (
-              <div className={`px-6 py-4 border-t ${darkMode ? 'border-gray-700 bg-gray-700' : 'border-gray-200 bg-gray-50'}`}>
-                <div className="flex items-center justify-between">
-                  <div className={`text-sm ${darkMode ? 'text-gray-300' : 'text-gray-600'}`}>
-                    📄 Images will be arranged in the order shown above
-                  </div>
-                  <div className="flex space-x-3">
-                    <button
-                      onClick={() => {
-                        setShowPdfConverter(false)
-                        pdfPreviewUrls.forEach(url => URL.revokeObjectURL(url))
-                        setPdfImages([])
-                        setPdfPreviewUrls([])
-                      }}
-                      className={`px-4 py-2 rounded-lg transition-colors ${darkMode ? 'text-gray-300 hover:bg-gray-600' : 'text-gray-600 hover:bg-gray-200'}`}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      onClick={generatePDF}
-                      className="bg-blue-500 text-white px-6 py-2 rounded-lg hover:bg-blue-600 transition-colors"
-                    >
-                      Generate PDF
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
+      <PdfConverterModal
+        show={showPdfConverter}
+        darkMode={darkMode}
+        pdfImages={pdfImages}
+        pdfPreviewUrls={pdfPreviewUrls}
+        pdfImageInputRef={pdfImageInputRef}
+        onClose={closePdfConverter}
+        onRemoveImage={removePdfImage}
+        onMoveImage={movePdfImage}
+        onGeneratePdf={generatePDF}
+      />
 
       {/* Settings Modal */}
       <SettingsModal
