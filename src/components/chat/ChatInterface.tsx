@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Send, Brain, Plus, Paperclip, X, Pin, PinOff, MessageSquare, Settings, Trash2, Search, Menu, XCircle, LogOut, User, Palette, Bell, Shield, Moon, Sun, MessageSquarePlus, Globe, SearchCheck, FileText, ChevronUp, ChevronDown } from 'lucide-react'
+import { Send, Plus, Paperclip, X, Pin, PinOff, MessageSquare, Settings, Trash2, Search, Menu, XCircle, Moon, Sun, MessageSquarePlus, Globe, SearchCheck, FileText, ChevronUp, ChevronDown } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { useAuth } from '@/hooks/useAuth'
 import { Message, Conversation } from '@/types/chat'
@@ -9,9 +9,9 @@ import ChatMessage from './ChatMessage'
 import SettingsModal from '../settings/SettingsModal'
 import FontSizeControl from '../ui/FontSizeControl'
 import { getTimeAgo, formatDate } from '@/utils/timeHelpers'
-import { persistImageAttachmentUrl } from '@/lib/chat/attachments'
-import { appendAssistantContent } from '@/lib/chat/streaming'
-import { readChatStream } from './hooks/useChatStreaming'
+import { compressAndConvertImage, convertHeicToJpeg, fileToBase64 } from './lib/fileProcessing'
+import { useAttachmentComposer } from './hooks/useAttachmentComposer'
+import { useChatSend } from './hooks/useChatSend'
 
 export default function ChatInterface() {
   const { user } = useAuth()
@@ -23,11 +23,6 @@ export default function ChatInterface() {
   const [pinnedConversations, setPinnedConversations] = useState<Conversation[]>([])
   const [deepResearchMode, setDeepResearchMode] = useState(false)
   const [webSearchEnabled, setWebSearchEnabled] = useState(false)
-  const [attachedFiles, setAttachedFiles] = useState<File[]>([])
-  const [previewUrls, setPreviewUrls] = useState<string[]>([])
-  const [showAttachmentMenu, setShowAttachmentMenu] = useState(false)
-  const [isDragging, setIsDragging] = useState(false)
-  const [dragCounter, setDragCounter] = useState(0)
   const [searchQuery, setSearchQuery] = useState('')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -42,20 +37,35 @@ export default function ChatInterface() {
   const [pdfImages, setPdfImages] = useState<File[]>([])
   const [pdfPreviewUrls, setPdfPreviewUrls] = useState<string[]>([])
   const messagesEndRef = useRef<HTMLDivElement>(null)
-  const fileInputRef = useRef<HTMLInputElement>(null)
-  const imageInputRef = useRef<HTMLInputElement>(null)
   const pdfImageInputRef = useRef<HTMLInputElement>(null)
-  const attachmentMenuRef = useRef<HTMLDivElement>(null)
-  const requestControllerRef = useRef<AbortController | null>(null)
-  const thinkingDelayRef = useRef<NodeJS.Timeout | null>(null)
-  const isProcessingRef = useRef<boolean>(false)
-  const dropZoneRef = useRef<HTMLDivElement>(null)
-  const previewUrlsRef = useRef<string[]>([])
   const pdfPreviewUrlsRef = useRef<string[]>([])
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }
+
+  const {
+    attachedFiles,
+    previewUrls,
+    showAttachmentMenu,
+    isDragging,
+    fileInputRef,
+    imageInputRef,
+    attachmentMenuRef,
+    handleFileUpload,
+    removeFile,
+    clearComposerAttachments,
+    handleImageClick,
+    handleFileClick,
+    handlePdfConverterClick,
+    toggleAttachmentMenu,
+    handleDragEnter,
+    handleDragLeave,
+    handleDragOver,
+    handleDrop,
+  } = useAttachmentComposer({
+    onOpenPdfConverter: () => setShowPdfConverter(true),
+  })
 
   // Save dark mode preference to localStorage
   useEffect(() => {
@@ -64,259 +74,9 @@ export default function ChatInterface() {
     }
   }, [darkMode])
 
-  // Helper function to convert HEIC files to JPEG
-  const convertHeicToJpeg = async (file: File): Promise<File> => {
-    try {
-      // Dynamically import heic2any to avoid SSR issues
-      const heic2any = (await import('heic2any')).default
-      
-      const convertedBlob = await heic2any({
-        blob: file,
-        toType: 'image/jpeg',
-        quality: 0.8
-      }) as Blob
-
-      // Create a new File object with the converted blob
-      const convertedFile = new File(
-        [convertedBlob], 
-        file.name.replace(/\.heic$/i, '.jpg'), 
-        { type: 'image/jpeg' }
-      )
-      
-      return convertedFile
-    } catch (error) {
-      console.error('Error converting HEIC file:', error)
-      throw new Error(`Failed to convert HEIC file: ${file.name}`)
-    }
-  }
-
-  // File upload handlers
-  const handleFileUpload = async (files: FileList | null) => {
-    if (!files) return
-
-    const newFiles = Array.from(files)
-    const processedFiles: File[] = []
-    
-    for (const file of newFiles) {
-      // Support common file types for both Windows and Mac
-      const allowedTypes = [
-        // Images
-        'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 'image/heic', 'image/heif',
-        // Documents
-        'application/pdf', 'text/plain', 'text/csv',
-        'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-        'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        // Code files
-        'text/javascript', 'text/html', 'text/css', 'application/json'
-      ]
-
-      // Different size limits for different file types
-      const imageMaxSize = 5 * 1024 * 1024 // 5MB limit for images (will be compressed)
-      const docMaxSize = 10 * 1024 * 1024 // 10MB limit for documents
-
-      // Check if file type is supported (including HEIC files by extension)
-      const isHeicFile = file.name.match(/\.(heic|heif)$/i)
-      const isAllowedType = allowedTypes.includes(file.type) || isHeicFile
-      const isAllowedExtension = file.name.match(/\.(txt|md|js|ts|py|java|cpp|c|h)$/i)
-
-      if (!isAllowedType && !isAllowedExtension) {
-        alert(`File type not supported: ${file.name}`)
-        continue
-      }
-
-      // Check file size based on type
-      const isImage = file.type.startsWith('image/') || isHeicFile
-      const maxSize = isImage ? imageMaxSize : docMaxSize
-      const maxSizeText = isImage ? '5MB' : '10MB'
-
-      if (file.size > maxSize) {
-        alert(`File too large: ${file.name} (max ${maxSizeText})`)
-        continue
-      }
-
-      try {
-        // Convert HEIC files to JPEG
-        if (isHeicFile) {
-          const convertedFile = await convertHeicToJpeg(file)
-          processedFiles.push(convertedFile)
-        } else {
-          processedFiles.push(file)
-        }
-      } catch (error) {
-        console.error('Error processing file:', error)
-        alert(`Error processing file: ${file.name}`)
-        continue
-      }
-    }
-
-    if (processedFiles.length > 0) {
-      setAttachedFiles(prev => [...prev, ...processedFiles])
-
-      // Create preview URLs for images
-      processedFiles.forEach(file => {
-        if (file.type.startsWith('image/')) {
-          const url = URL.createObjectURL(file)
-          setPreviewUrls(prev => [...prev, url])
-        } else {
-          setPreviewUrls(prev => [...prev, ''])
-        }
-      })
-    }
-  }
-
-  const removeFile = (index: number) => {
-    const fileToRemove = attachedFiles[index]
-    const urlToRevoke = previewUrls[index]
-
-    if (urlToRevoke && fileToRemove.type.startsWith('image/')) {
-      URL.revokeObjectURL(urlToRevoke)
-    }
-
-    setAttachedFiles(prev => prev.filter((_, i) => i !== index))
-    setPreviewUrls(prev => prev.filter((_, i) => i !== index))
-  }
-
-  const clearComposerAttachments = useCallback(() => {
-    setPreviewUrls((existingUrls) => {
-      existingUrls.forEach((url) => {
-        if (url && url.startsWith('blob:')) {
-          URL.revokeObjectURL(url)
-        }
-      })
-      return []
-    })
-    setAttachedFiles([])
-  }, [])
-
-  const handleImageClick = () => {
-    imageInputRef.current?.click()
-    setShowAttachmentMenu(false)
-  }
-
-  const handleFileClick = () => {
-    fileInputRef.current?.click()
-    setShowAttachmentMenu(false)
-  }
-
-  const handlePdfConverterClick = () => {
-    setShowPdfConverter(true)
-    setShowAttachmentMenu(false)
-  }
-
-  const toggleAttachmentMenu = () => {
-    setShowAttachmentMenu(!showAttachmentMenu)
-  }
-
-  // Drag and drop handlers
-  const handleDragEnter = (e: React.DragEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
-    setDragCounter(prev => prev + 1)
-
-    if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
-      setIsDragging(true)
-    }
-  }
-
-  const handleDragLeave = (e: React.DragEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
-    setDragCounter(prev => prev - 1)
-
-    if (dragCounter <= 1) {
-      setIsDragging(false)
-    }
-  }
-
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
-  }
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
-    setIsDragging(false)
-    setDragCounter(0)
-
-    const files = e.dataTransfer.files
-    if (files && files.length > 0) {
-      handleFileUpload(files)
-    }
-  }
-
-  // Compress and convert image to base64 for API
-  const compressAndConvertImage = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const canvas = document.createElement('canvas')
-      const ctx = canvas.getContext('2d')
-      const img = new Image()
-      const sourceUrl = URL.createObjectURL(file)
-
-      img.onload = () => {
-        // Calculate new dimensions (max 1024px on longest side)
-        let { width, height } = img
-        const maxSize = 1024
-
-        if (width > maxSize || height > maxSize) {
-          if (width > height) {
-            height = (height * maxSize) / width
-            width = maxSize
-          } else {
-            width = (width * maxSize) / height
-            height = maxSize
-          }
-        }
-
-        canvas.width = width
-        canvas.height = height
-
-        // Draw and compress
-        ctx?.drawImage(img, 0, 0, width, height)
-
-        // Convert to base64 with compression (0.8 quality for JPEG)
-        const quality = file.type === 'image/png' ? 1.0 : 0.8
-        const compressedDataUrl = canvas.toDataURL('image/jpeg', quality)
-        URL.revokeObjectURL(sourceUrl)
-
-        // Remove data:image/jpeg;base64, prefix
-        resolve(compressedDataUrl.split(',')[1])
-      }
-
-      img.onerror = () => {
-        URL.revokeObjectURL(sourceUrl)
-        reject(new Error('Failed to load image'))
-      }
-      img.src = sourceUrl
-    })
-  }
-
-  // Convert file to base64 for API (with compression for images)
-  const fileToBase64 = (file: File): Promise<string> => {
-    // For images, use compression
-    if (file.type.startsWith('image/')) {
-      return compressAndConvertImage(file)
-    }
-
-    // For non-images, use original method
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader()
-      reader.readAsDataURL(file)
-      reader.onload = () => {
-        const result = reader.result as string
-        resolve(result.split(',')[1]) // Remove data:image/jpeg;base64, prefix
-      }
-      reader.onerror = error => reject(error)
-    })
-  }
-
   useEffect(() => {
     scrollToBottom()
   }, [messages])
-
-  useEffect(() => {
-    previewUrlsRef.current = previewUrls
-  }, [previewUrls])
 
   useEffect(() => {
     pdfPreviewUrlsRef.current = pdfPreviewUrls
@@ -324,86 +84,13 @@ export default function ChatInterface() {
 
   useEffect(() => {
     return () => {
-      previewUrlsRef.current.forEach((url) => {
-        if (url && url.startsWith('blob:')) {
-          URL.revokeObjectURL(url)
-        }
-      })
-
       pdfPreviewUrlsRef.current.forEach((url) => {
         if (url && url.startsWith('blob:')) {
           URL.revokeObjectURL(url)
         }
       })
-
-      if (requestControllerRef.current) {
-        requestControllerRef.current.abort()
-      }
     }
   }, [])
-
-  // Close attachment menu when clicking outside
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (attachmentMenuRef.current && !attachmentMenuRef.current.contains(event.target as Node)) {
-        setShowAttachmentMenu(false)
-      }
-    }
-
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside)
-    }
-  }, [])
-
-  // Prevent default drag behaviors globally and add global paste handler
-  useEffect(() => {
-    const preventDefaults = (e: Event) => {
-      e.preventDefault()
-      e.stopPropagation()
-    }
-
-    const events = ['dragenter', 'dragover', 'dragleave', 'drop']
-
-    events.forEach(eventName => {
-      document.addEventListener(eventName, preventDefaults, false)
-    })
-
-    // Global paste handler for images
-    const handleGlobalPaste = async (e: ClipboardEvent) => {
-      const items = e.clipboardData?.items
-      if (!items) return
-
-      const files: File[] = []
-
-      for (let i = 0; i < items.length; i++) {
-        const item = items[i]
-        if (item.type.startsWith('image/')) {
-          const file = item.getAsFile()
-          if (file) {
-            files.push(file)
-          }
-        }
-      }
-
-      // Only handle if there are actually images to paste
-      if (files.length > 0) {
-        e.preventDefault()
-        const fileList = new DataTransfer()
-        files.forEach(file => fileList.items.add(file))
-        await handleFileUpload(fileList.files)
-      }
-    }
-
-    document.addEventListener('paste', handleGlobalPaste)
-
-    return () => {
-      events.forEach(eventName => {
-        document.removeEventListener(eventName, preventDefaults, false)
-      })
-      document.removeEventListener('paste', handleGlobalPaste)
-    }
-  }, [handleFileUpload])
 
   // PDF converter functions
   const handlePdfImageUpload = async (files: FileList | null) => {
@@ -824,240 +511,25 @@ export default function ChatInterface() {
     }
   }
 
-  const sendMessage = async () => {
-    type ChatAttachmentPayload =
-      | {
-          type: 'image'
-          name: string
-          mimeType: string
-          data: string
-        }
-      | {
-          type: 'document'
-          name: string
-          mimeType: string
-          content: string
-        }
-
-    console.log('Send message clicked', {
-      hasMessage: !!currentMessage.trim(),
-      hasConversation: !!currentConversation,
-      hasUser: !!user,
-      attachedFiles: attachedFiles.length
-    })
-
-    if ((!currentMessage.trim() && attachedFiles.length === 0) || !user) {
-      console.log('Send message aborted - missing requirements')
-      return
-    }
-
-    let conversationToUse = currentConversation
-    if (!conversationToUse) {
-      conversationToUse = await createNewConversation()
-      if (!conversationToUse) {
-        console.error('Failed to create new conversation')
-        return
-      }
-      setCurrentConversation(conversationToUse)
-    }
-
-    if (isProcessingRef.current) {
-      console.log('[Chat] Already processing a request, ignoring duplicate')
-      return
-    }
-    isProcessingRef.current = true
-
-    thinkingDelayRef.current = setTimeout(() => {
-      if (isProcessingRef.current) {
-        setLoading(true)
-      }
-      thinkingDelayRef.current = null
-    }, 800)
-
-    try {
-      const isFirstMessage = messages.length === 0
-      const messageToSend = currentMessage.trim()
-      const attachmentsToSend: ChatAttachmentPayload[] = []
-      const encodedImageMap = new Map<File, string>()
-
-      for (const file of attachedFiles) {
-        if (file.type.startsWith('image/')) {
-          const base64 = await fileToBase64(file)
-          encodedImageMap.set(file, base64)
-          attachmentsToSend.push({
-            type: 'image',
-            name: file.name,
-            mimeType: file.type,
-            data: base64
-          })
-          continue
-        }
-
-        const text = await file.text()
-        attachmentsToSend.push({
-          type: 'document',
-          name: file.name,
-          mimeType: file.type,
-          content: text.substring(0, 10000)
-        })
-      }
-
-      const attachedImageUrls: string[] = []
-      for (const file of attachedFiles) {
-        if (!file.type.startsWith('image/')) {
-          continue
-        }
-
-        const persistedUrl = await persistImageAttachmentUrl({
-          supabase,
-          userId: user.id,
-          conversationId: conversationToUse.id,
-          file,
-          fallbackProvider: async () => {
-            const base64 = encodedImageMap.get(file) ?? (await fileToBase64(file))
-            return `data:image/jpeg;base64,${base64}`
-          }
-        })
-        attachedImageUrls.push(persistedUrl)
-      }
-
-      const { data: userMessage } = await supabase
-        .from('messages')
-        .insert({
-          conversation_id: conversationToUse.id,
-          content: messageToSend || '📎 Attached files',
-          is_ai: false,
-          image_urls: attachedImageUrls.length > 0 ? attachedImageUrls : null
-        })
-        .select()
-        .single()
-
-      if (userMessage) {
-        setMessages((prev) => [...prev, userMessage])
-      }
-
-      setCurrentMessage('')
-      clearComposerAttachments()
-
-      const requestBody = {
-        message: messageToSend,
-        conversationId: conversationToUse.id,
-        deepResearch: deepResearchMode,
-        attachments: attachmentsToSend,
-        generateTitle: isFirstMessage,
-        allowWebSearch: webSearchEnabled,
-        enableAIWebSearchDetection: !webSearchEnabled
-      }
-
-      if (requestControllerRef.current) {
-        requestControllerRef.current.abort()
-      }
-      requestControllerRef.current = new AbortController()
-
-      const timeoutId = setTimeout(() => {
-        console.log('[Chat] Request timeout - aborting after 4 minutes')
-        requestControllerRef.current?.abort()
-      }, 240000)
-
-      try {
-        const needsToolingTransport = webSearchEnabled || /\b(weather|stock|price|news|exchange rate|latest|today|current|draw|image|picture|artwork|generate)\b/i.test(messageToSend)
-        const useStreamTransport = !needsToolingTransport
-        const endpoint = useStreamTransport ? '/api/chat/stream' : '/api/chat'
-
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(requestBody),
-          signal: requestControllerRef.current.signal
-        })
-
-        if (!response.ok) {
-          throw new Error('Failed to get AI response')
-        }
-
-        if (useStreamTransport) {
-          const streamingMessageId = `streaming-${Date.now()}`
-          let sawContent = false
-
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: streamingMessageId,
-              conversation_id: conversationToUse.id,
-              content: '',
-              is_ai: true,
-              created_at: new Date().toISOString()
-            }
-          ])
-
-          await readChatStream({
-            response,
-            onEvent: (event) => {
-              if (event.type === 'content') {
-                sawContent = true
-                if (thinkingDelayRef.current) {
-                  clearTimeout(thinkingDelayRef.current)
-                  thinkingDelayRef.current = null
-                }
-                setLoading(false)
-                setMessages((prev) =>
-                  prev.map((message) =>
-                    message.id === streamingMessageId
-                      ? { ...message, content: appendAssistantContent(message.content, event.content) }
-                      : message
-                  )
-                )
-              }
-            }
-          })
-
-          if (!sawContent) {
-            setMessages((prev) => prev.filter((message) => message.id !== streamingMessageId))
-          }
-        } else {
-          await response.json()
-        }
-
-        await Promise.all([
-          loadMessages(conversationToUse.id),
-          loadConversations()
-        ])
-      } finally {
-        clearTimeout(timeoutId)
-        requestControllerRef.current = null
-      }
-    } catch (apiError) {
-      console.error('Error calling chat API:', apiError)
-
-      let errorContent = 'Sorry, I encountered an error processing your message. Please try again.'
-      if (apiError instanceof Error) {
-        if (apiError.name === 'AbortError') {
-          errorContent = 'Request timed out after 4 minutes. Please try again.'
-        } else if (apiError.message.includes('Failed to fetch')) {
-          errorContent = 'Network error. Please check your connection and try again.'
-        }
-      }
-
-      const errorMessage = {
-        id: `error-${Date.now()}`,
-        conversation_id: conversationToUse.id,
-        content: errorContent,
-        is_ai: true,
-        created_at: new Date().toISOString()
-      }
-      setMessages((prev) => [...prev, errorMessage])
-    } finally {
-      if (thinkingDelayRef.current) {
-        clearTimeout(thinkingDelayRef.current)
-        thinkingDelayRef.current = null
-      }
-      setLoading(false)
-      isProcessingRef.current = false
-      requestControllerRef.current = null
-    }
-  }
+  const sendMessage = useChatSend({
+    user: user ? { id: user.id } : null,
+    supabase,
+    currentConversation,
+    setCurrentConversation,
+    messages,
+    setMessages,
+    currentMessage,
+    setCurrentMessage,
+    setLoading,
+    attachedFiles,
+    deepResearchMode,
+    webSearchEnabled,
+    createNewConversation,
+    loadMessages,
+    loadConversations,
+    fileToBase64,
+    clearComposerAttachments,
+  })
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -1306,7 +778,6 @@ export default function ChatInterface() {
       {/* Main Chat Area */}
       <div
         className="flex-1 flex flex-col relative"
-        ref={dropZoneRef}
         onDragEnter={handleDragEnter}
         onDragLeave={handleDragLeave}
         onDragOver={handleDragOver}
